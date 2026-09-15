@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -60,12 +61,16 @@ func TestCredProvisioner_ProvisionCopiesCredentialsPrivately(t *testing.T) {
 	assertMode(t, filepath.Join(cfg, ".credentials.json"), 0o600)
 }
 
-func TestCredProvisioner_ProvisionTrustsWorkdirInHostConfigCopy(t *testing.T) {
+func TestCredProvisioner_ProvisionCopiesOnlyStartupKeysAndTrustsWorkdir(t *testing.T) {
 	hostClaudeJSON := `{
-  "numStartups": 9007199254740993,
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.1.260",
+  "oauthAccount": { "emailAddress": "op@example.com", "accountCreatedAt": 9007199254740993 },
+  "machineID": "m-fake",
   "userID": "u-fake",
+  "numStartups": 42,
   "projects": {
-    "/elsewhere": { "hasTrustDialogAccepted": false, "lastCost": 1.25 }
+    "/elsewhere": { "hasTrustDialogAccepted": true, "lastCost": 1.25 }
   }
 }`
 	host := writeHostConfig(t, map[string]string{
@@ -83,27 +88,41 @@ func TestCredProvisioner_ProvisionTrustsWorkdirInHostConfigCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read copied .claude.json: %v", err)
 	}
-	if !bytes.Contains(raw, []byte("9007199254740993")) {
-		t.Errorf("large integer lost precision in copy:\n%s", raw)
-	}
-	var got struct {
-		UserID   string `json:"userID"`
-		Projects map[string]struct {
-			HasTrustDialogAccepted bool    `json:"hasTrustDialogAccepted"`
-			LastCost               float64 `json:"lastCost"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(raw, &got); err != nil {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
 		t.Fatalf("copied .claude.json is not JSON: %v\n%s", err, raw)
 	}
-	if !got.Projects["/work"].HasTrustDialogAccepted {
-		t.Errorf("projects[/work].hasTrustDialogAccepted not set:\n%s", raw)
+	var keys []string
+	for k := range top {
+		keys = append(keys, k)
 	}
-	if other := got.Projects["/elsewhere"]; other.HasTrustDialogAccepted || other.LastCost != 1.25 {
-		t.Errorf("unrelated project changed: %+v", other)
+	slices.Sort(keys)
+	if want := []string{"hasCompletedOnboarding", "lastOnboardingVersion", "oauthAccount", "projects"}; !slices.Equal(keys, want) {
+		t.Errorf("top-level keys = %v, want %v", keys, want)
 	}
-	if got.UserID != "u-fake" {
-		t.Errorf("userID = %q, want host value preserved", got.UserID)
+	for _, leaked := range []string{"m-fake", "u-fake", "/elsewhere", "numStartups"} {
+		if bytes.Contains(raw, []byte(leaked)) {
+			t.Errorf("host value %q leaked into the doer config:\n%s", leaked, raw)
+		}
+	}
+	for _, kept := range []string{"op@example.com", "2.1.260", "9007199254740993"} {
+		if !bytes.Contains(raw, []byte(kept)) {
+			t.Errorf("allowlisted host value %q missing (or lost precision):\n%s", kept, raw)
+		}
+	}
+	var got struct {
+		HasCompletedOnboarding bool                      `json:"hasCompletedOnboarding"`
+		Projects               map[string]map[string]any `json:"projects"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode copied .claude.json: %v", err)
+	}
+	if !got.HasCompletedOnboarding {
+		t.Errorf("hasCompletedOnboarding not carried over:\n%s", raw)
+	}
+	wantProjects := map[string]map[string]any{"/work": {"hasTrustDialogAccepted": true}}
+	if len(got.Projects) != 1 || len(got.Projects["/work"]) != 1 || got.Projects["/work"]["hasTrustDialogAccepted"] != true {
+		t.Errorf("projects = %v, want exactly %v", got.Projects, wantProjects)
 	}
 	assertMode(t, path, 0o600)
 }
