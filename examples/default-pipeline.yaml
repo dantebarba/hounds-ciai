@@ -43,7 +43,11 @@ policies:
   # rejected, because it would preempt the transitions it is meant to back up.
   # drive_deadline: 3h
   execution:
+    # herdr runs agents on the host. container runs each task's agent in its own
+    # Docker container: build the doer image and export CLAUDE_CONFIG_DIR first
+    # (see "Container backend" in the README), then run `orchestratord doctor`.
     backend: herdr
+    # image: hounds-doer:latest
     run_as: non_root
     sandbox: true
 

@@ -325,24 +325,93 @@ rejected):
 **`policies`** — `max_concurrent_tasks`, `dry_run`, `circuit_breaker`,
 `retry_caps` (a per-state cap map, `state_name: N`), the liveness bounds
 `no_progress_timeout` / `blocked_timeout` / `drive_deadline`, and `execution`
-(`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`,
+(`backend: herdr|container`, `run_as: root|non_root`, `sandbox: bool`,
 `image`: the doer image the container backend runs, default `hounds-doer:latest`).
 The engine reads these: `retry_caps` bounds per-state retries and is validated,
 `dry_run` gates the real merge, the three bounds below keep work from wedging,
 and `max_concurrent_tasks` bounds the daemon's concurrency (R2).
-`circuit_breaker` and the finer `execution` knobs (`sandbox`) are parsed but not
+`execution.backend` selects how agents run: `herdr` (the default) on the host,
+or `container` in one Docker container per task (below). Any other value
+refuses to start. `circuit_breaker`, `run_as` and `sandbox` are parsed but not
 yet enforced.
 
-The container backend's doer image bakes only the environment (git, `gh`,
-ripgrep, ca-certs, a non-root `agent` home); the agent binary and credentials
-are mounted at run time. Build the default tag from the repo root:
+#### Container backend
 
-```sh
-docker build -t hounds-doer:latest -f docker/doer/Dockerfile docker/doer
-```
+With `execution.backend: container`, each task's agent (a *doer*) runs in its
+own Docker container inside its herdr pane. You still peek at and answer it from
+its herdr tab, and herdr still reports idle/working/blocked/done, because the
+`docker` process carries `HERDR_AGENT`. The target is Docker on Linux.
 
-To add tools your repos need, build your own image from that Dockerfile and
-point `execution.image` at its tag.
+**Set it up**
+
+1. Build the doer image from the repo root. It bakes only the environment (git,
+   `gh`, ripgrep, ca-certs, a non-root home); the agent binary and credentials
+   are mounted at run time.
+
+   ```sh
+   docker build -t hounds-doer:latest -f docker/doer/Dockerfile docker/doer
+   ```
+
+   To add tools your repos need, build your own image from that Dockerfile and
+   set `execution.image` to its tag.
+2. Select the backend in your workflow:
+
+   ```yaml
+   policies:
+     execution:
+       backend: container
+       image: hounds-doer:latest   # optional; this is the default
+   ```
+3. Export `CLAUDE_CONFIG_DIR` for the daemon, pointing at the agent config dir
+   whose login doers copy (for example `~/.claude-personal`). The daemon refuses
+   to start without it.
+4. Log in to `gh` on the host (`gh auth login`) and set
+   `git config --global user.name` and `user.email`. Doers push and open PRs
+   with these.
+5. Run `orchestratord doctor`.
+
+**Doctor checks.** These also run in the daemon's startup preflight. Each skips
+unless the backend is `container`.
+
+| Check | Fails when | Fix |
+| --- | --- | --- |
+| `docker-daemon` | `docker info` fails | Start Docker and make sure the daemon's user can run `docker info`. |
+| `doer-image` | The configured image isn't present locally. | Run the build command above, or set `execution.image` to an image you have. |
+| `agent-config-dir` | `CLAUDE_CONFIG_DIR` is unset or holds no `.credentials.json`. | Log the agent in with `CLAUDE_CONFIG_DIR` set. |
+
+**What a doer sees**
+
+- Its worktree and the repository's `.git`, mounted read-write at their **host
+  paths**, so git metadata resolves inside the container.
+- A private per-task home at `/hounds/agent`, created on the host under the user
+  cache dir (`hounds/doer-creds/<task>`, mode 0700) and used as `HOME`,
+  `CLAUDE_CONFIG_DIR` and the agent's temp dir. It holds:
+  - a copy of the host agent login (`.credentials.json`);
+  - an **allowlisted** `.claude.json`: `hasCompletedOnboarding`,
+    `lastOnboardingVersion` and `oauthAccount`, plus folder trust for the
+    worktree. None of the host's other projects, `machineID` or `userID`;
+  - GitHub access as files: `.config/gh/hosts.yml` with the host's `gh` token,
+    and a `.gitconfig` with your git identity, `gh` as the credential helper for
+    github.com, and SSH GitHub remotes rewritten to HTTPS. A host whose `gh` has
+    no token fails the spawn.
+- The agent binary, found on the host's `PATH`, mounted read-only as
+  `/usr/local/bin/<name>`. It must be a Linux build.
+
+The container runs as your host uid and gid.
+
+**When the copies are deleted.** The per-task home, both tokens included, is
+deleted when its task settles (a terminal state or a cancel, with or without a
+PR) and when a spawn fails. A task paused at a non-terminal goal halt keeps it.
+
+**Know before you rely on it**
+
+- Doers carry your host `gh` token with **all of its scopes**.
+- An escalated doer keeps running in its pane, but its login is deleted when
+  the task settles, so answering it fails on authentication.
+- `orchestratord doctor`'s kickoff-delivery check still launches the agent on
+  the host, not in a container, so it does not prove the container launch.
+- The container isolates the filesystem and processes, not credentials: every
+  doer holds working tokens.
 
 #### Liveness bounds
 
