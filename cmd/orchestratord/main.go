@@ -306,6 +306,7 @@ type wired struct {
 	gh      github.Client
 	wf      *config.Workflow
 	repoDir string
+	backend agentBackend
 }
 
 // wire loads+validates the config and builds the engine with real backends.
@@ -378,7 +379,7 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 		Notifier:       notifier,
 		StartState:     start,
 	})
-	return &wired{eng: eng, store: st, gh: gh, wf: wf, repoDir: absRepo}, nil
+	return &wired{eng: eng, store: st, gh: gh, wf: wf, repoDir: absRepo, backend: backend}, nil
 }
 
 func cmdRun(args []string) int {
@@ -591,6 +592,15 @@ func cmdDaemon(args []string) int {
 			}
 		}()
 		slog.Info("mcp control server listening", "addr", *mcpListen)
+	}
+
+	if watcher, ok := w.backend.(interface {
+		WatchPaneClosures(context.Context, time.Duration, func(error))
+	}); ok {
+		go watcher.WatchPaneClosures(ctx, *pollInterval, func(err error) {
+			slog.Warn("credential reaper pass failed", "err", err)
+		})
+		slog.Info("credential reaper started", "interval", pollInterval.String())
 	}
 
 	slog.Info("daemon starting", "label", label, "workers", workers, "poll", pollInterval.String())

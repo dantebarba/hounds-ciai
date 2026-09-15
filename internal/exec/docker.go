@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 )
@@ -36,8 +39,10 @@ type dockerDeps struct {
 // still detects the agent and reports its status through the container.
 type DockerBackend struct {
 	*Herdr
-	deps  dockerDeps
-	creds *credProvisioner
+	deps     dockerDeps
+	creds    *credProvisioner
+	spawnMu  sync.Mutex
+	spawning map[string]int
 }
 
 var _ ExecutionBackend = (*DockerBackend)(nil)
@@ -84,9 +89,10 @@ func resolveAgentBinary(name string) (string, error) {
 // newDockerBackend returns a DockerBackend that drives herdr and docker through r.
 func newDockerBackend(r proc.Runner, deps dockerDeps) *DockerBackend {
 	return &DockerBackend{
-		Herdr: NewHerdr(r),
-		deps:  deps,
-		creds: newCredProvisioner(deps.hostConfigDir, deps.credsRoot),
+		Herdr:    NewHerdr(r),
+		deps:     deps,
+		creds:    newCredProvisioner(deps.hostConfigDir, deps.credsRoot),
+		spawning: map[string]int{},
 	}
 }
 
@@ -102,6 +108,8 @@ func (d *DockerBackend) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 	if len(s.Launch) == 0 {
 		return Handle{}, errors.New("docker spawn: no launch argv")
 	}
+	d.markSpawning(s.TaskID)
+	defer d.unmarkSpawning(s.TaskID)
 	agent := filepath.Base(s.Launch[0])
 	agentBin, err := d.deps.resolveAgent(s.Launch[0])
 	if err != nil {
@@ -152,9 +160,98 @@ func (d *DockerBackend) Cleanup(ctx context.Context, taskID string) error {
 	return errors.Join(d.Herdr.Cleanup(ctx, taskID), d.creds.Discard(ctx, taskID))
 }
 
-// Release discards the task's credential copy, so a settled task leaves no
-// token on disk whether or not its worktree is kept for a human.
+// Release discards the task's credential copy once its herdr pane is gone. A
+// doer's credentials live as long as its pane: while the pane is open, even for
+// a settled or escalated task, a human can still answer the agent, so the copy
+// is kept and the pane-closure reaper discards it later.
 func (d *DockerBackend) Release(ctx context.Context, taskID string) error {
+	_, alive, err := d.Resolve(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("release %s: check pane: %w", taskID, err)
+	}
+	if alive {
+		return nil
+	}
+	return d.creds.Discard(ctx, taskID)
+}
+
+// WatchPaneClosures runs ReapClosedPanes once immediately, catching panes that
+// closed while the daemon was down, and then every interval until ctx is done. A
+// failed pass is reported to onError, when set, and never stops the loop.
+func (d *DockerBackend) WatchPaneClosures(ctx context.Context, interval time.Duration, onError func(error)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if err := d.ReapClosedPanes(ctx); err != nil && onError != nil && ctx.Err() == nil {
+			onError(err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// markSpawning records that taskID is being spawned, so the pane-closure reaper
+// leaves its credentials alone during the window before its pane exists.
+func (d *DockerBackend) markSpawning(taskID string) {
+	d.spawnMu.Lock()
+	defer d.spawnMu.Unlock()
+	d.spawning[taskID]++
+}
+
+// unmarkSpawning clears one in-flight spawn of taskID.
+func (d *DockerBackend) unmarkSpawning(taskID string) {
+	d.spawnMu.Lock()
+	defer d.spawnMu.Unlock()
+	if d.spawning[taskID]--; d.spawning[taskID] <= 0 {
+		delete(d.spawning, taskID)
+	}
+}
+
+// ReapClosedPanes discards the credential copy of every task whose herdr pane is
+// gone, whether a human closed it, the engine's cleanup closed it, or it closed
+// while the daemon was down. Tasks mid-spawn are skipped, since their credentials
+// exist before their pane does. One task's failure does not stop the pass; every
+// failure is returned together.
+func (d *DockerBackend) ReapClosedPanes(ctx context.Context) error {
+	entries, err := os.ReadDir(d.deps.credsRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reap closed panes: read creds root: %w", err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if err := d.reapIfClosed(ctx, entry.Name()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// reapIfClosed discards taskID's credential copy when it is not mid-spawn and has
+// no live herdr pane. The check and the discard run under the in-flight lock, so
+// a spawn that starts during the pass waits and then provisions a fresh copy the
+// reaper can no longer remove.
+func (d *DockerBackend) reapIfClosed(ctx context.Context, taskID string) error {
+	d.spawnMu.Lock()
+	defer d.spawnMu.Unlock()
+	if d.spawning[taskID] > 0 {
+		return nil
+	}
+	_, alive, err := d.Resolve(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("reap %s: check pane: %w", taskID, err)
+	}
+	if alive {
+		return nil
+	}
 	return d.creds.Discard(ctx, taskID)
 }
 

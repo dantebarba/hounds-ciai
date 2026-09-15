@@ -399,15 +399,18 @@ unless the backend is `container`.
 
 The container runs as your host uid and gid.
 
-**When the copies are deleted.** The per-task home, both tokens included, is
-deleted when its task settles (a terminal state or a cancel, with or without a
-PR) and when a spawn fails. A task paused at a non-terminal goal halt keeps it.
+**When the copies are deleted.** A doer's per-task home, both tokens included,
+lives as long as its herdr pane. While the pane is open, even after its task has
+settled or escalated, the home is kept, so you can still answer the agent. It is
+deleted once the pane is closed: by you, by the engine's cleanup, or while the
+daemon was down. The daemon checks at startup and then every poll interval. A
+spawn that fails deletes the home immediately.
 
 **Know before you rely on it**
 
 - Doers carry your host `gh` token with **all of its scopes**.
-- An escalated doer keeps running in its pane, but its login is deleted when
-  the task settles, so answering it fails on authentication.
+- A doer's tokens stay on disk until its pane is closed. Tasks that opened a PR
+  keep their pane open, so close the panes you no longer need.
 - `orchestratord doctor`'s kickoff-delivery check still launches the agent on
   the host, not in a container, so it does not prove the container launch.
 - The container isolates the filesystem and processes, not credentials: every
