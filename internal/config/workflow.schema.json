@@ -42,7 +42,8 @@
           "properties": {
             "backend": { "type": "string", "enum": ["herdr", "local", "container"] },
             "run_as": { "type": "string", "enum": ["root", "non_root"] },
-            "sandbox": { "type": "boolean" }
+            "sandbox": { "type": "boolean" },
+            "image": { "type": "string", "minLength": 1 }
           }
         }
       }

@@ -140,11 +140,25 @@ func (wf *Workflow) LongestStateTimeout() (time.Duration, error) {
 // false performs it.
 func (p Policies) DryRunEnabled() bool { return p.DryRun == nil || *p.DryRun }
 
+// DefaultDoerImage is the doer image the container backend runs when a workflow
+// names none: the tag the docker/doer/Dockerfile build instructions produce.
+const DefaultDoerImage = "hounds-doer:latest"
+
 // Execution describes how agents are run.
 type Execution struct {
 	Backend string `yaml:"backend"` // herdr | local | container
 	RunAs   string `yaml:"run_as"`  // root | non_root
 	Sandbox bool   `yaml:"sandbox"`
+	Image   string `yaml:"image"`
+}
+
+// DoerImage returns the image the container backend runs each doer in: the
+// configured image, or DefaultDoerImage when none is set.
+func (e Execution) DoerImage() string {
+	if e.Image == "" {
+		return DefaultDoerImage
+	}
+	return e.Image
 }
 
 // Source is a place work originates; currently only github_issues, polled by the daemon.

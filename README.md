@@ -325,12 +325,24 @@ rejected):
 **`policies`** — `max_concurrent_tasks`, `dry_run`, `circuit_breaker`,
 `retry_caps` (a per-state cap map, `state_name: N`), the liveness bounds
 `no_progress_timeout` / `blocked_timeout` / `drive_deadline`, and `execution`
-(`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`).
+(`backend: herdr|local|container`, `run_as: root|non_root`, `sandbox: bool`,
+`image`: the doer image the container backend runs, default `hounds-doer:latest`).
 The engine reads these: `retry_caps` bounds per-state retries and is validated,
 `dry_run` gates the real merge, the three bounds below keep work from wedging,
 and `max_concurrent_tasks` bounds the daemon's concurrency (R2).
 `circuit_breaker` and the finer `execution` knobs (`sandbox`) are parsed but not
 yet enforced.
+
+The container backend's doer image bakes only the environment (git, `gh`,
+ripgrep, ca-certs, a non-root `agent` home); the agent binary and credentials
+are mounted at run time. Build the default tag from the repo root:
+
+```sh
+docker build -t hounds-doer:latest -f docker/doer/Dockerfile docker/doer
+```
+
+To add tools your repos need, build your own image from that Dockerfile and
+point `execution.image` at its tag.
 
 #### Liveness bounds
 

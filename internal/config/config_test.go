@@ -209,6 +209,51 @@ states:
 	}
 }
 
+// TestExecution_Image covers the container backend's doer image: an absent
+// image falls back to the built-in default, a set one is used verbatim, and an
+// empty one is a schema error rather than a silent fallback.
+func TestExecution_Image(t *testing.T) {
+	const base = `
+version: 0
+name: image
+entry_state: done
+policies:
+  execution:
+    backend: container
+%s
+states:
+  done: { terminal: success }
+`
+	tests := []struct {
+		name       string
+		imageLine  string
+		want       string
+		wantSchema bool
+	}{
+		{name: "absent uses default", imageLine: "", want: DefaultDoerImage},
+		{name: "set is used verbatim", imageLine: "    image: ghcr.io/acme/doer:1.2", want: "ghcr.io/acme/doer:1.2"},
+		{name: "empty is rejected", imageLine: `    image: ""`, wantSchema: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wf, _, err := mustParse(t, strings.Replace(base, "%s", tc.imageLine, 1))
+			if tc.wantSchema {
+				var ve *ValidationErrors
+				if !errors.As(err, &ve) || ve.Stage != "schema" {
+					t.Fatalf("want schema-stage error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := wf.Policies.Execution.DoerImage(); got != tc.want {
+				t.Errorf("DoerImage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // --- Invariants in isolation. ---
 
 func TestInvariant1_UnknownRefs(t *testing.T) {
