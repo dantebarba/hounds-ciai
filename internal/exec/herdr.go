@@ -399,6 +399,10 @@ func (h *Herdr) Cleanup(ctx context.Context, taskID string) error {
 	return nil
 }
 
+// Release is a no-op: an agent running directly on the host holds no per-task
+// resources beyond its worktree and workspace, which Cleanup owns.
+func (h *Herdr) Release(ctx context.Context, taskID string) error { return nil }
+
 // --- helpers ---
 
 func (h *Herdr) worktreePath(s Spawn) string { return h.worktreeDir(s.RepoDir, s.TaskID) }

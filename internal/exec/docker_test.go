@@ -183,6 +183,31 @@ func TestNewDocker_RequiresAgentConfigDir(t *testing.T) {
 	}
 }
 
+func TestDockerBackend_ReleaseDiscardsCredentials(t *testing.T) {
+	f := paneCreatingFake("w7:p1")
+	credsRoot := t.TempDir()
+	d := testDockerBackend(t, f, credsRoot)
+	ctx := context.Background()
+
+	if _, err := d.Spawn(ctx, testSpawn()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	taskDir := filepath.Join(credsRoot, "issue-5")
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Fatalf("precondition: per-task dir missing after Spawn: %v", err)
+	}
+
+	if err := d.Release(ctx, "issue-5"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+		t.Errorf("credential copy still on disk after Release (stat err = %v)", err)
+	}
+	if err := d.Release(ctx, "issue-5"); err != nil {
+		t.Errorf("second Release = %v, want nil", err)
+	}
+}
+
 func TestDockerBackend_CleanupDiscardsCredentialsEvenWithNoWorkspace(t *testing.T) {
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
 		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" {

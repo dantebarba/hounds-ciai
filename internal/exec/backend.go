@@ -71,4 +71,10 @@ type ExecutionBackend interface {
 	// no artifact to preserve (a no-PR terminal halt). It is idempotent-safe: an
 	// already-removed worktree or already-closed workspace is not an error.
 	Cleanup(ctx context.Context, taskID string) error
+	// Release frees what the backend holds for a task that has settled (reached a
+	// terminal state or been cancelled), such as a per-task credential copy. It is
+	// separate from Cleanup because it applies on every settle, including ones
+	// that deliberately keep the worktree for a human. It is idempotent-safe:
+	// releasing an already-released or never-spawned task is not an error.
+	Release(ctx context.Context, taskID string) error
 }

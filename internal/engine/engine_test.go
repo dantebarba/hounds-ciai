@@ -30,6 +30,8 @@ type fakeBackend struct {
 	verdictOnSpawn map[string]string // role -> verdict JSON the spawned agent "writes" (see Spawn)
 	cleanups       []string          // taskIDs Cleanup was called with
 	cleanupErr     error
+	releases       []string // taskIDs Release was called with
+	releaseErr     error
 	// readFunc scripts pane reads (the no-progress confirmation read). Nil keeps
 	// the default: an empty, unchanging pane.
 	readFunc func(lines int) (string, error)
@@ -84,6 +86,10 @@ func (f *fakeBackend) Close(ctx context.Context, h exec.Handle) error { return n
 func (f *fakeBackend) Cleanup(ctx context.Context, taskID string) error {
 	f.cleanups = append(f.cleanups, taskID)
 	return f.cleanupErr
+}
+func (f *fakeBackend) Release(ctx context.Context, taskID string) error {
+	f.releases = append(f.releases, taskID)
+	return f.releaseErr
 }
 
 type fakeGH struct {

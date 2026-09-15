@@ -388,6 +388,7 @@ func (e *Engine) settleDeadline(ctx context.Context, task *store.Task) (string, 
 		return from, fmt.Errorf("settle drive deadline: %w", err)
 	}
 	e.notifyTerminalAlert(sctx, task)
+	e.maybeRelease(sctx, task)
 	return target, nil
 }
 
@@ -444,6 +445,7 @@ func (e *Engine) driveLoop(ctx context.Context, task *store.Task) (string, error
 			if transitioned {
 				e.notifyTerminalAlert(ctx, task)
 				e.maybeCleanup(ctx, task)
+				e.maybeRelease(ctx, task)
 			}
 			e.log.Info("halt", "task", task.ID, "state", task.CurrentState, "pr", prNum(task))
 			return task.CurrentState, nil
@@ -1427,6 +1429,7 @@ func (e *Engine) settleCancelled(ctx context.Context, task *store.Task) (string,
 		return task.CurrentState, fmt.Errorf("settle cancelled: %w", err)
 	}
 	e.log.Info("task cancelled by operator", "task", task.ID)
+	e.maybeRelease(sctx, task)
 	return CancelState, nil
 }
 
@@ -1460,6 +1463,20 @@ func (e *Engine) maybeCleanup(ctx context.Context, task *store.Task) {
 	}
 	if err := e.backend.Cleanup(ctx, task.ID); err != nil {
 		e.log.Warn("cleanup failed", "task", task.ID, "state", task.CurrentState, "err", err)
+	}
+}
+
+// maybeRelease frees the backend's per-task resources once a task has settled:
+// a terminal state, with or without a PR, or an operator cancel. A non-terminal
+// halt (a goal state such as pr_open, or the dry-run merge halt) is left alone,
+// since the task is still in flight. Release is best-effort like Cleanup: a
+// failure is logged and never fails the drive.
+func (e *Engine) maybeRelease(ctx context.Context, task *store.Task) {
+	if !e.isSettled(task.CurrentState) {
+		return
+	}
+	if err := e.backend.Release(ctx, task.ID); err != nil {
+		e.log.Warn("release failed", "task", task.ID, "state", task.CurrentState, "err", err)
 	}
 }
 

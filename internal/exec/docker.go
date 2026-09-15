@@ -148,6 +148,12 @@ func (d *DockerBackend) Cleanup(ctx context.Context, taskID string) error {
 	return errors.Join(d.Herdr.Cleanup(ctx, taskID), d.creds.Discard(ctx, taskID))
 }
 
+// Release discards the task's credential copy, so a settled task leaves no
+// token on disk whether or not its worktree is kept for a human.
+func (d *DockerBackend) Release(ctx context.Context, taskID string) error {
+	return d.creds.Discard(ctx, taskID)
+}
+
 // shellQuote returns arg as a single shell word: unchanged when every character
 // is one no POSIX shell treats specially, otherwise single-quoted with embedded
 // single quotes escaped. herdr runs the launch line through the pane's shell, so
