@@ -49,7 +49,6 @@ import (
 	"github.com/sean1588/herdr-orchestrator/internal/doctor"
 	"github.com/sean1588/herdr-orchestrator/internal/engine"
 	"github.com/sean1588/herdr-orchestrator/internal/eventlog"
-	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/github"
 	"github.com/sean1588/herdr-orchestrator/internal/mcp"
 	"github.com/sean1588/herdr-orchestrator/internal/notify"
@@ -342,10 +341,9 @@ func (cf commonFlags) wire(ctx context.Context) (*wired, error) {
 	// Every subprocess carries a budget, so a hung git/gh/herdr fails in seconds
 	// with a precise error instead of wedging its worker with no timer running.
 	runner := proc.WithTimeout(proc.New(), cf.commandTimeout)
-	backend := exec.NewHerdr(runner)
-	backend.RepoDir = absRepo // lets Cleanup resolve a task's worktree path deterministically
-	if cf.worktreesDir != "" {
-		backend.WorktreesDir = cf.worktreesDir
+	backend, err := newBackend(wf, runner, absRepo, cf.worktreesDir)
+	if err != nil {
+		return nil, fmt.Errorf("execution backend: %w", err)
 	}
 
 	// nil notifier => engine.New defaults to notify.Nop (no out-of-band delivery).

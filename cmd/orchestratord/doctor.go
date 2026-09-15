@@ -12,7 +12,6 @@ import (
 
 	"github.com/sean1588/herdr-orchestrator/internal/config"
 	"github.com/sean1588/herdr-orchestrator/internal/doctor"
-	"github.com/sean1588/herdr-orchestrator/internal/exec"
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
 )
 
@@ -79,12 +78,9 @@ func (cf commonFlags) doctorEnv() (doctor.Env, error) {
 		if label, lerr := sourceLabel(wf); lerr == nil {
 			env.Label = label
 		}
-		backend := exec.NewHerdr(env.Runner)
-		backend.RepoDir = env.RepoDir
-		if cf.worktreesDir != "" {
-			backend.WorktreesDir = cf.worktreesDir
+		if backend, berr := newBackend(wf, env.Runner, env.RepoDir, cf.worktreesDir); berr == nil {
+			env.Smoker = backend
 		}
-		env.Smoker = backend
 	}
 	return env, nil
 }

@@ -121,13 +121,38 @@ func TestRun_HealthyEnvironmentPassesEverything(t *testing.T) {
 	if len(results) != len(Checks()) {
 		t.Fatalf("got %d results for %d checks", len(results), len(Checks()))
 	}
+	containerOnly := map[string]bool{"docker-daemon": true, "doer-image": true, "agent-config-dir": true}
 	for _, r := range results {
+		if containerOnly[r.Name] {
+			if r.Status != StatusSkip {
+				t.Errorf("container check %q = %s (%s) on the herdr backend, want skip", r.Name, r.Status, r.Detail)
+			}
+			continue
+		}
 		if r.Status != StatusPass {
 			t.Errorf("check %q = %s (%s)", r.Name, r.Status, r.Detail)
 		}
 	}
 	if Failed(results) {
 		t.Error("a healthy environment must not report failure")
+	}
+}
+
+func TestRun_HealthyContainerEnvironmentPassesEverything(t *testing.T) {
+	login := t.TempDir()
+	if err := os.WriteFile(filepath.Join(login, ".credentials.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := containerEnv(t, login, "")
+	results := Run(context.Background(), env, true)
+
+	if len(results) != len(Checks()) {
+		t.Fatalf("got %d results for %d checks", len(results), len(Checks()))
+	}
+	for _, r := range results {
+		if r.Status != StatusPass {
+			t.Errorf("check %q = %s (%s)", r.Name, r.Status, r.Detail)
+		}
 	}
 }
 
@@ -326,5 +351,112 @@ func TestKickoffSmokeUsesADeterministicRoleLaunch(t *testing.T) {
 		if fmt.Sprint(got) != fmt.Sprint([]string{"claude", "--flag"}) {
 			t.Fatalf("firstLaunch = %v on iteration %d, want the alphabetically-first role's argv", got, i)
 		}
+	}
+}
+
+// containerEnv is healthyEnv switched to the container backend, with
+// CLAUDE_CONFIG_DIR reporting configDir and the docker subcommand named by
+// failDocker (e.g. "info", "image") failing; every other command succeeds.
+func containerEnv(t *testing.T, configDir, failDocker string) (Env, *proc.Fake) {
+	t.Helper()
+	env, f := healthyEnv(t)
+	env.Workflow.Policies.Execution.Backend = "container"
+	env.Getenv = func(k string) string {
+		if k == "CLAUDE_CONFIG_DIR" {
+			return configDir
+		}
+		return ""
+	}
+	base := f.Responder
+	f.Responder = func(c proc.Call) ([]byte, error) {
+		if c.Name == "docker" && len(c.Args) > 0 && c.Args[0] == failDocker {
+			return nil, errors.New("docker: simulated failure")
+		}
+		return base(c)
+	}
+	return env, f
+}
+
+func TestContainerPreflightChecks(t *testing.T) {
+	login := t.TempDir()
+	if err := os.WriteFile(filepath.Join(login, ".credentials.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noLogin := t.TempDir()
+	containerChecks := []string{"docker-daemon", "doer-image", "agent-config-dir"}
+
+	tests := []struct {
+		name     string
+		env      func(t *testing.T) (Env, *proc.Fake)
+		want     map[string]Status
+		wantFix  map[string]string
+		wantCall string
+	}{
+		{
+			name: "herdr backend skips container checks",
+			env:  healthyEnv,
+			want: map[string]Status{"docker-daemon": StatusSkip, "doer-image": StatusSkip, "agent-config-dir": StatusSkip},
+		},
+		{
+			name:     "healthy container host passes",
+			env:      func(t *testing.T) (Env, *proc.Fake) { return containerEnv(t, login, "") },
+			want:     map[string]Status{"docker-daemon": StatusPass, "doer-image": StatusPass, "agent-config-dir": StatusPass},
+			wantCall: "docker image inspect hounds-doer:latest",
+		},
+		{
+			name: "unreachable docker daemon fails",
+			env:  func(t *testing.T) (Env, *proc.Fake) { return containerEnv(t, login, "info") },
+			want: map[string]Status{"docker-daemon": StatusFail},
+		},
+		{
+			name:    "missing doer image fails with the build command",
+			env:     func(t *testing.T) (Env, *proc.Fake) { return containerEnv(t, login, "image") },
+			want:    map[string]Status{"doer-image": StatusFail},
+			wantFix: map[string]string{"doer-image": "docker build"},
+		},
+		{
+			name: "unset agent config dir fails",
+			env:  func(t *testing.T) (Env, *proc.Fake) { return containerEnv(t, "", "") },
+			want: map[string]Status{"agent-config-dir": StatusFail},
+		},
+		{
+			name: "agent config dir without a login fails",
+			env:  func(t *testing.T) (Env, *proc.Fake) { return containerEnv(t, noLogin, "") },
+			want: map[string]Status{"agent-config-dir": StatusFail},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, f := tc.env(t)
+			results := Run(context.Background(), env, false)
+			for _, name := range containerChecks {
+				if byName(results, name).Status == "missing" {
+					t.Errorf("check %q is not registered", name)
+				}
+			}
+			for name, want := range tc.want {
+				got := byName(results, name)
+				if got.Status != want {
+					t.Errorf("%s = %s (%s), want %s", name, got.Status, got.Detail, want)
+				}
+				if want == StatusFail && got.Fix == "" {
+					t.Errorf("%s failed without a fix", name)
+				}
+				if sub, ok := tc.wantFix[name]; ok && !strings.Contains(got.Fix, sub) {
+					t.Errorf("%s fix = %q, want it to mention %q", name, got.Fix, sub)
+				}
+			}
+			if tc.wantCall != "" {
+				found := false
+				for _, c := range f.Snapshot() {
+					if c.Name+" "+strings.Join(c.Args, " ") == tc.wantCall {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no call %q recorded", tc.wantCall)
+				}
+			}
+		})
 	}
 }

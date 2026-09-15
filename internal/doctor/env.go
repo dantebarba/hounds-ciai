@@ -34,7 +34,7 @@ type Env struct {
 	WorktreesDir string
 	DBPath       string
 
-	GitBin, GHBin, HerdrBin string
+	GitBin, GHBin, HerdrBin, DockerBin string
 
 	// Getenv reads the environment; injectable so the token check is testable
 	// without mutating the process environment.
@@ -55,6 +55,9 @@ func (e Env) withDefaults() Env {
 	}
 	if e.HerdrBin == "" {
 		e.HerdrBin = "herdr"
+	}
+	if e.DockerBin == "" {
+		e.DockerBin = "docker"
 	}
 	if e.Base == "" {
 		e.Base = "main"
