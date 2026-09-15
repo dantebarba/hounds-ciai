@@ -90,8 +90,9 @@ func newDockerBackend(r proc.Runner, deps dockerDeps) *DockerBackend {
 	}
 }
 
-// Spawn provisions the task's private agent home (credentials, trust for the
-// worktree, a temp dir), then spawns through the herdr backend with the agent
+// Spawn provisions the task's private agent home (the agent login, trust for the
+// worktree, GitHub access for git push and gh, a temp dir), then spawns through
+// the herdr backend with the agent
 // launch replaced by a container launch. The worktree and the repository's git
 // directory are mounted at their host paths, so git metadata and the trust entry
 // resolve identically inside the container. A failed spawn discards the
@@ -113,6 +114,9 @@ func (d *DockerBackend) Spawn(ctx context.Context, s Spawn) (Handle, error) {
 	}
 	if err := os.MkdirAll(filepath.Join(home, "tmp"), 0o700); err != nil {
 		return Handle{}, fmt.Errorf("docker spawn %s: create agent tmp dir: %w", s.TaskID, err)
+	}
+	if err := provisionGitHub(ctx, d.r, home); err != nil {
+		return Handle{}, errors.Join(fmt.Errorf("docker spawn %s: %w", s.TaskID, err), d.creds.Discard(context.WithoutCancel(ctx), s.TaskID))
 	}
 	gitDir := filepath.Join(s.RepoDir, ".git")
 	launch := []string{

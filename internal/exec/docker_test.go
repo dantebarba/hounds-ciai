@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sean1588/herdr-orchestrator/internal/proc"
@@ -17,11 +18,31 @@ import (
 // the given root pane, the only scripted response Spawn needs to reach the launch.
 func paneCreatingFake(pane string) *proc.Fake {
 	return &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if out, ok := hostGitHubAnswer(c); ok {
+			return out, nil
+		}
 		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
 			return []byte(fmt.Sprintf(`{"result":{"root_pane":{"pane_id":%q}}}`, pane)), nil
 		}
 		return nil, nil
 	}}
+}
+
+// hostGitHubAnswer scripts the host GitHub commands a container spawn runs (the
+// gh token and login, git's global identity), so docker backend tests reach the
+// launch as a host that is logged in to gh. ok is false for any other command.
+func hostGitHubAnswer(c proc.Call) (out []byte, ok bool) {
+	switch c.Name + " " + strings.Join(c.Args, " ") {
+	case "gh auth token":
+		return []byte("gho_fakeTOKEN123\n"), true
+	case "gh config get -h github.com user":
+		return []byte("octo-operator\n"), true
+	case "git config --global user.name":
+		return []byte("Octo Operator\n"), true
+	case "git config --global user.email":
+		return []byte("octo@example.com\n"), true
+	}
+	return nil, false
 }
 
 // testDockerBackend builds a DockerBackend over f with a fixed host identity and
@@ -81,6 +102,11 @@ func TestDockerBackend_SpawnLaunchesAgentInContainer(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(taskDir, "tmp")); err != nil || !info.IsDir() {
 		t.Errorf("agent tmp dir not created under the per-task dir (err = %v)", err)
 	}
+	for _, p := range []string{".gitconfig", filepath.Join(".config", "gh", "hosts.yml")} {
+		if _, err := os.Stat(filepath.Join(taskDir, p)); err != nil {
+			t.Errorf("GitHub credentials %s not provisioned in the per-task home: %v", p, err)
+		}
+	}
 }
 
 func TestDockerBackend_SpawnShellQuotesPathsWithSpaces(t *testing.T) {
@@ -108,6 +134,9 @@ func TestDockerBackend_SpawnShellQuotesPathsWithSpaces(t *testing.T) {
 
 func TestDockerBackend_SpawnFailureDiscardsCredentials(t *testing.T) {
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if out, ok := hostGitHubAnswer(c); ok {
+			return out, nil
+		}
 		if c.Name == "git" && slices.Contains(c.Args, "worktree") && slices.Contains(c.Args, "add") {
 			return nil, errors.New("fatal: could not create worktree")
 		}
@@ -174,6 +203,32 @@ func TestNewDocker_DefaultsFromHostEnvironment(t *testing.T) {
 	}
 }
 
+func TestDockerBackend_SpawnWithoutGitHubTokenFailsAndDiscards(t *testing.T) {
+	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if c.Name == "gh" && len(c.Args) >= 2 && c.Args[0] == "auth" && c.Args[1] == "token" {
+			return nil, errors.New("exit status 1: no oauth token found")
+		}
+		if out, ok := hostGitHubAnswer(c); ok {
+			return out, nil
+		}
+		return nil, nil
+	}}
+	credsRoot := t.TempDir()
+	d := testDockerBackend(t, f, credsRoot)
+
+	if _, err := d.Spawn(context.Background(), testSpawn()); err == nil {
+		t.Fatal("Spawn = nil error, want the missing GitHub token")
+	}
+	if _, err := os.Stat(filepath.Join(credsRoot, "issue-5")); !os.IsNotExist(err) {
+		t.Errorf("per-task home left on disk after a failed GitHub provision (stat err = %v)", err)
+	}
+	for _, c := range f.Snapshot() {
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" && c.Args[1] == "create" {
+			t.Error("spawn created a herdr workspace despite having no GitHub token")
+		}
+	}
+}
+
 func TestNewDocker_RequiresAgentConfigDir(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -210,6 +265,9 @@ func TestDockerBackend_ReleaseDiscardsCredentials(t *testing.T) {
 
 func TestDockerBackend_CleanupDiscardsCredentialsEvenWithNoWorkspace(t *testing.T) {
 	f := &proc.Fake{Responder: func(c proc.Call) ([]byte, error) {
+		if out, ok := hostGitHubAnswer(c); ok {
+			return out, nil
+		}
 		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "workspace" {
 			switch c.Args[1] {
 			case "create":
